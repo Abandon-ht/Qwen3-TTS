@@ -384,7 +384,8 @@ class Qwen3TTSTokenizerV2DecoderRMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        inv_sqrt = torch.pow(variance + self.variance_epsilon, -0.5)
+        hidden_states = hidden_states * inv_sqrt
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):
@@ -609,7 +610,8 @@ class SnakeBeta(nn.Module):
         beta = self.beta.unsqueeze(0).unsqueeze(-1)
         alpha = torch.exp(alpha)
         beta = torch.exp(beta)
-        hidden_states = hidden_states + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(
+        beta_inv = torch.pow(beta + self.no_div_by_zero, -1.0)
+        hidden_states = hidden_states + beta_inv * torch.pow(
             torch.sin(hidden_states * alpha), 2
         )
 
@@ -674,7 +676,9 @@ class EuclideanCodebook(nn.Module):
         self.embedding_sum = nn.Parameter(torch.zeros(codebook_size, dim))
 
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
-        embedding = self.embedding_sum / self.cluster_usage.clamp(min=self.epsilon)[:, None]
+        usage = self.cluster_usage.clamp(min=self.epsilon)[:, None]
+        usage_inv = torch.pow(usage, -1.0)
+        embedding = self.embedding_sum * usage_inv
         quantized = F.embedding(codes, embedding)
         return quantized
 

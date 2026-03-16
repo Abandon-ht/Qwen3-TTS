@@ -28,7 +28,7 @@ def main():
         MODEL_PATH,
         device_map=device,
         dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation="eager",
     )
 
     # -------- Single --------
@@ -36,14 +36,17 @@ def main():
     t0 = time.time()
 
     wavs, sr = tts.generate_voice_design(
-        text="哥哥，你回来啦，人家等了你好久好久了，要抱抱！",
+        text="哥哥，你回来啦，人家等了你好久好久了，要抱抱！哥哥，你回来啦，人家等了你好久好久了，要抱抱！哥哥，你回来啦，人家等了你好久好久了，要抱抱！哥哥，你回来啦，人家等了你好久好久了，要抱抱！哥哥，你回来啦，人家等了你好久好久了，要抱抱！",
         language="Chinese",
         instruct="体现撒娇稚嫩的萝莉女声，音调偏高且起伏明显，营造出黏人、做作又刻意卖萌的听觉效果。",
     )
 
     torch.cuda.synchronize()
     t1 = time.time()
-    print(f"[VoiceDesign Single] time: {t1 - t0:.3f}s")
+    elapsed = t1 - t0
+    audio_duration = len(wavs[0]) / sr
+    rtf = elapsed / audio_duration
+    print(f"[VoiceDesign Single] time: {elapsed:.3f}s, audio: {audio_duration:.2f}s, RTF: {rtf:.3f}")
 
     sf.write("qwen3_tts_test_voice_design_single.wav", wavs[0], sr)
 
@@ -70,7 +73,10 @@ def main():
 
     torch.cuda.synchronize()
     t1 = time.time()
-    print(f"[VoiceDesign Batch] time: {t1 - t0:.3f}s")
+    elapsed = t1 - t0
+    total_audio_duration = sum(len(w) for w in wavs) / sr
+    avg_rtf = elapsed / total_audio_duration
+    print(f"[VoiceDesign Batch] time: {elapsed:.3f}s, audio: {total_audio_duration:.2f}s, RTF: {avg_rtf:.3f}")
 
     for i, w in enumerate(wavs):
         sf.write(f"qwen3_tts_test_voice_design_batch_{i}.wav", w, sr)

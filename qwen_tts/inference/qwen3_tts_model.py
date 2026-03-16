@@ -716,6 +716,63 @@ class Qwen3TTSModel:
 
         gen_kwargs = self._merge_generate_kwargs(**kwargs)
 
+        # Debug: save input parameters to text file
+        import os
+        debug_dir = "/home/m5stack/Workspace/Qwen3-TTS/debug_output"
+        os.makedirs(debug_dir, exist_ok=True)
+        debug_input_file = os.path.join(debug_dir, "voice_design_input.txt")
+        with open(debug_input_file, "w", encoding="utf-8") as f:
+            f.write("=" * 60 + "\n")
+            f.write("VoiceDesign Input Parameters\n")
+            f.write("=" * 60 + "\n\n")
+
+            # texts
+            f.write(f"texts (original input): {texts}\n")
+            f.write(f"texts count: {len(texts)}\n\n")
+
+            # languages
+            f.write(f"languages: {languages}\n")
+            f.write(f"languages count: {len(languages)}\n\n")
+
+            # instructs
+            f.write(f"instructs (original input): {instructs}\n")
+            f.write(f"instructs count: {len(instructs)}\n\n")
+
+            # non_streaming_mode
+            f.write(f"non_streaming_mode: {non_streaming_mode}\n\n")
+
+            # input_ids (tokenized text)
+            f.write("input_ids (tokenized text):\n")
+            for i, ids in enumerate(input_ids):
+                f.write(f"  Sample {i}: shape={ids.shape}, dtype={ids.dtype}\n")
+                ids_np = ids.cpu().numpy().flatten()
+                f.write(f"    Values: {ids_np.tolist()}\n")
+                f.write(f"    Min: {ids_np.min()}, Max: {ids_np.max()}, Mean: {ids_np.mean():.4f}\n")
+            f.write("\n")
+
+            # instruct_ids (tokenized instruct)
+            f.write("instruct_ids (tokenized instruct):\n")
+            for i, ids in enumerate(instruct_ids):
+                if ids is None:
+                    f.write(f"  Sample {i}: None\n")
+                else:
+                    f.write(f"  Sample {i}: shape={ids.shape}, dtype={ids.dtype}\n")
+                    ids_np = ids.cpu().numpy().flatten()
+                    f.write(f"    Values: {ids_np.tolist()}\n")
+                    f.write(f"    Min: {ids_np.min()}, Max: {ids_np.max()}, Mean: {ids_np.mean():.4f}\n")
+            f.write("\n")
+
+            # gen_kwargs (generation parameters)
+            f.write("gen_kwargs (generation parameters):\n")
+            for key, val in gen_kwargs.items():
+                if isinstance(val, torch.Tensor):
+                    f.write(f"  {key}: Tensor shape={val.shape}, dtype={val.dtype}\n")
+                elif isinstance(val, list):
+                    f.write(f"  {key}: list len={len(val)}\n")
+                else:
+                    f.write(f"  {key}: {val}\n")
+        print(f"[DEBUG] Input parameters saved to {debug_input_file}")
+
         talker_codes_list, _ = self.model.generate(
             input_ids=input_ids,
             instruct_ids=instruct_ids,
@@ -723,6 +780,26 @@ class Qwen3TTSModel:
             non_streaming_mode=non_streaming_mode,
             **gen_kwargs,
         )
+
+        # Debug: save output codes to text file
+        debug_output_file = os.path.join(debug_dir, "voice_design_output.txt")
+        with open(debug_output_file, "w", encoding="utf-8") as f:
+            f.write(f"Number of samples: {len(talker_codes_list)}\n\n")
+            for i, codes in enumerate(talker_codes_list):
+                f.write(f"=== Sample {i} ===\n")
+                f.write(f"Shape: {codes.shape}\n")
+                f.write(f"Dtype: {codes.dtype}\n")
+                codes_np = codes.cpu().numpy()
+                flat = codes_np.flatten()
+                f.write(f"Values: {flat.tolist()}\n")
+                f.write(f"Min: {flat.min()}, Max: {flat.max()}, Mean: {flat.mean():.4f}\n\n")
+
+                # ==== 新增代码：将张量保存为 npy 文件 ====
+                npy_filename = os.path.join(debug_dir, f"sample_{i}_codes.npy")
+                np.save(npy_filename, codes_np)
+                print(f"[DEBUG] Saved codes tensor for sample {i} to {npy_filename}")
+                # ==========================================
+        print(f"[DEBUG] Output codes saved to {debug_output_file}")
 
         wavs, fs = self.model.speech_tokenizer.decode([{"audio_codes": c} for c in talker_codes_list])
         return wavs, fs
