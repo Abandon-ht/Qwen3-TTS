@@ -718,7 +718,7 @@ class Qwen3TTSModel:
 
         # Debug: save input parameters to text file
         import os
-        debug_dir = "/home/m5stack/Workspace/Qwen3-TTS/debug_output"
+        debug_dir = "debug_output"
         os.makedirs(debug_dir, exist_ok=True)
         debug_input_file = os.path.join(debug_dir, "voice_design_input.txt")
         with open(debug_input_file, "w", encoding="utf-8") as f:

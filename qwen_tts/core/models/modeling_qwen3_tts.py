@@ -2270,7 +2270,7 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
 
         # Debug: Save talker input and output to file
         import os
-        debug_dir = "/home/m5stack/Workspace/Qwen3-TTS/debug_output"
+        debug_dir = "debug_output"
         os.makedirs(debug_dir, exist_ok=True)
 
         # Save talker input info
