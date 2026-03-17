@@ -384,8 +384,8 @@ class Qwen3TTSTokenizerV2DecoderRMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        inv_sqrt = torch.pow(variance + self.variance_epsilon, -0.5)
-        hidden_states = hidden_states * inv_sqrt
+        std = torch.sqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states / std
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):
