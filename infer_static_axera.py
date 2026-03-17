@@ -3,7 +3,7 @@ import axengine as ort
 import numpy as np
 import soundfile as sf
 
-def infer_onnx(onnx_path: str, input_npy_path: str, output_wav_path: str, processed_npy_path: str = None, sample_rate: int = 24000):
+def infer_onnx(onnx_path: str, input_npy_path: str, output_wav_path: str, processed_npy_path: str = None, output_npy_path: str = None, sample_rate: int = 24000):
     print(f"Loading ONNX model from: {onnx_path}")
     
     session = ort.InferenceSession(onnx_path)
@@ -43,6 +43,10 @@ def infer_onnx(onnx_path: str, input_npy_path: str, output_wav_path: str, proces
     wav_tensor = outputs[0]
     print(f"Output wav shape: {wav_tensor.shape}")
     
+    if output_npy_path:
+        print(f"Saving output NPY data to: {output_npy_path}")
+        np.save(output_npy_path, wav_tensor)
+    
     wav_1d = wav_tensor.flatten()
     
     print(f"Saving audio to {output_wav_path} (Sample Rate: {sample_rate} Hz)")
@@ -53,8 +57,9 @@ def infer_onnx(onnx_path: str, input_npy_path: str, output_wav_path: str, proces
 if __name__ == "__main__":
 
     ONNX_MODEL_PATH = "qwen3_tts_12hz_decoder.axmodel"
-    NPY_FILE_PATH = "debug_output/sample_0_codes.npy" 
+    NPY_FILE_PATH = "codes/processed_sample_0_codes.npy" 
     OUTPUT_WAV_FILE = "debug_output/axmodel_output.wav"
+    OUTPUT_NPY_FILE = "debug_output/axmodel_output.npy"
     
     PROCESSED_NPY_FILE = "debug_output/processed_sample_0_codes.npy"
     
@@ -63,5 +68,6 @@ if __name__ == "__main__":
         input_npy_path=NPY_FILE_PATH, 
         output_wav_path=OUTPUT_WAV_FILE, 
         processed_npy_path=PROCESSED_NPY_FILE, 
+        output_npy_path=OUTPUT_NPY_FILE,
         sample_rate=24000
     )
