@@ -28,7 +28,7 @@ def main():
         MODEL_PATH,
         device_map=device,
         dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        # attn_implementation="flash_attention_2",
     )
 
     # -------- Single --------
@@ -39,6 +39,13 @@ def main():
         text="哥哥，你回来啦，人家等了你好久好久了，要抱抱！",
         language="Chinese",
         instruct="体现撒娇稚嫩的萝莉女声，音调偏高且起伏明显，营造出黏人、做作又刻意卖萌的听觉效果。",
+        dump_talker_prefill_path="debug_output/python_talker_prefill_input.bin",
+        dump_talker_prefill_last_hidden_path="debug_output/python_talker_prefill_last_hidden.bin",
+        dump_talker_step0_logits_path="debug_output/python_talker_step0_logits.npy",
+        dump_talker_decode_dir="debug_output/python_talker_decode",
+        dump_talker_decode_max_steps=8,
+        dump_talker_kv_cache_dir="debug_output/python_talker_decode",
+        dump_talker_kv_cache_max_steps=8,
     )
 
     torch.cuda.synchronize()
@@ -48,32 +55,32 @@ def main():
     sf.write("qwen3_tts_test_voice_design_single.wav", wavs[0], sr)
 
     # -------- Batch --------
-    texts = [
-        "哥哥，你回来啦，人家等了你好久好久了，要抱抱！",
-        "It's in the top drawer... wait, it's empty? No way, that's impossible! I'm sure I put it there!"
-    ]
-    languages = ["Chinese", "English"]
-    instructs = [
-        "体现撒娇稚嫩的萝莉女声，音调偏高且起伏明显，营造出黏人、做作又刻意卖萌的听觉效果。",
-        "Speak in an incredulous tone, but with a hint of panic beginning to creep into your voice."
-    ]
+    # texts = [
+    #     "哥哥，你回来啦，人家等了你好久好久了，要抱抱！",
+    #     "It's in the top drawer... wait, it's empty? No way, that's impossible! I'm sure I put it there!"
+    # ]
+    # languages = ["Chinese", "English"]
+    # instructs = [
+    #     "体现撒娇稚嫩的萝莉女声，音调偏高且起伏明显，营造出黏人、做作又刻意卖萌的听觉效果。",
+    #     "Speak in an incredulous tone, but with a hint of panic beginning to creep into your voice."
+    # ]
 
-    torch.cuda.synchronize()
-    t0 = time.time()
+    # torch.cuda.synchronize()
+    # t0 = time.time()
 
-    wavs, sr = tts.generate_voice_design(
-        text=texts,
-        language=languages,
-        instruct=instructs,
-        max_new_tokens=2048,
-    )
+    # wavs, sr = tts.generate_voice_design(
+    #     text=texts,
+    #     language=languages,
+    #     instruct=instructs,
+    #     max_new_tokens=2048,
+    # )
 
-    torch.cuda.synchronize()
-    t1 = time.time()
-    print(f"[VoiceDesign Batch] time: {t1 - t0:.3f}s")
+    # torch.cuda.synchronize()
+    # t1 = time.time()
+    # print(f"[VoiceDesign Batch] time: {t1 - t0:.3f}s")
 
-    for i, w in enumerate(wavs):
-        sf.write(f"qwen3_tts_test_voice_design_batch_{i}.wav", w, sr)
+    # for i, w in enumerate(wavs):
+    #     sf.write(f"qwen3_tts_test_voice_design_batch_{i}.wav", w, sr)
 
 
 if __name__ == "__main__":

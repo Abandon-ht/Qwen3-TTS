@@ -16,10 +16,12 @@
 
 import json
 import os
+import struct
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import huggingface_hub
+import numpy as np
 import torch
 from huggingface_hub import snapshot_download
 from librosa.filters import mel as librosa_mel_fn
@@ -395,6 +397,219 @@ class Qwen3TTSSpeakerEncoder(torch.nn.Module):
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
     return torch.log(torch.clamp(x, min=clip_val) * C)
+
+
+def dump_bf16_tensor3d(hidden_states: torch.Tensor, dump_path: str) -> None:
+    if hidden_states.ndim != 3:
+        raise ValueError(f"Expected a 3D tensor to dump, got shape {tuple(hidden_states.shape)}")
+
+    tensor = hidden_states.detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
+    batch, seq, hidden = tensor.shape
+    os.makedirs(os.path.dirname(dump_path) or ".", exist_ok=True)
+
+    with open(dump_path, "wb") as file_obj:
+        file_obj.write(struct.pack("III", batch, seq, hidden))
+        file_obj.write(tensor.view(torch.uint16).numpy().tobytes())
+
+
+def dump_talker_prefill_debug_artifacts(
+    talker_input_embeds: torch.Tensor,
+    talker_attention_mask: torch.Tensor,
+    dump_path: str,
+    original_lengths: Optional[torch.Tensor] = None,
+) -> None:
+    dump_bf16_tensor3d(talker_input_embeds, dump_path)
+
+    base_path, _ = os.path.splitext(dump_path)
+    mask_path = f"{base_path}_attention_mask.npy"
+    npy_path = f"{base_path}.npy"
+
+    os.makedirs(os.path.dirname(dump_path) or ".", exist_ok=True)
+    torch.save(
+        {
+            "shape": tuple(talker_input_embeds.shape),
+            "dtype": str(talker_input_embeds.dtype),
+            "attention_mask": talker_attention_mask.detach().to(device="cpu", dtype=torch.int32),
+            "original_lengths": None
+            if original_lengths is None
+            else original_lengths.detach().to(device="cpu", dtype=torch.int32),
+        },
+        f"{base_path}_meta.pt",
+    )
+    np.save(mask_path, talker_attention_mask.detach().to(device="cpu", dtype=torch.int32).numpy())
+    np.save(npy_path, talker_input_embeds.detach().to(device="cpu", dtype=torch.float32).numpy())
+
+
+def dump_talker_step0_debug_artifacts(
+    past_hidden: torch.Tensor,
+    logits: torch.Tensor,
+    hidden_dump_path: Optional[str] = None,
+    logits_dump_path: Optional[str] = None,
+) -> None:
+    if hidden_dump_path is not None:
+        dump_bf16_tensor3d(past_hidden, hidden_dump_path)
+
+    if logits_dump_path is not None:
+        os.makedirs(os.path.dirname(logits_dump_path) or ".", exist_ok=True)
+        np.save(logits_dump_path, logits.detach().to(device="cpu", dtype=torch.float32).numpy())
+
+
+def cache_tensor_to_seq_hidden(cache_tensor: torch.Tensor, valid_seq_len: Optional[int] = None) -> torch.Tensor:
+    if cache_tensor.ndim != 4:
+        raise ValueError(f"Expected cache tensor with 4 dims, got shape {tuple(cache_tensor.shape)}")
+
+    batch, num_heads, seq_len, head_dim = cache_tensor.shape
+    target_seq_len = seq_len if valid_seq_len is None else min(seq_len, valid_seq_len)
+    if target_seq_len <= 0:
+        raise ValueError(f"Invalid cache sequence length {target_seq_len} for shape {tuple(cache_tensor.shape)}")
+
+    return (
+        cache_tensor[:, :, :target_seq_len, :]
+        .permute(0, 2, 1, 3)
+        .contiguous()
+        .reshape(batch, target_seq_len, num_heads * head_dim)
+    )
+
+
+def iter_cache_layers(past_key_values: Optional[Cache]) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    if past_key_values is None:
+        return []
+
+    key_cache = getattr(past_key_values, "key_cache", None)
+    value_cache = getattr(past_key_values, "value_cache", None)
+    if key_cache is not None and value_cache is not None:
+        return list(zip(key_cache, value_cache))
+
+    return [(layer[0], layer[1]) for layer in past_key_values]
+
+
+def dump_talker_kv_cache_debug_artifacts(
+    dump_dir: str,
+    prefix: str,
+    past_key_values: Optional[Cache],
+    valid_seq_len: Optional[int] = None,
+) -> None:
+    if past_key_values is None:
+        return
+
+    os.makedirs(dump_dir, exist_ok=True)
+    for layer_idx, (key_cache, value_cache) in enumerate(iter_cache_layers(past_key_values)):
+        key_hidden = cache_tensor_to_seq_hidden(key_cache, valid_seq_len=valid_seq_len)
+        value_hidden = cache_tensor_to_seq_hidden(value_cache, valid_seq_len=valid_seq_len)
+        dump_bf16_tensor3d(key_hidden, os.path.join(dump_dir, f"{prefix}_layer_{layer_idx:02d}_key_cache.bin"))
+        dump_bf16_tensor3d(value_hidden, os.path.join(dump_dir, f"{prefix}_layer_{layer_idx:02d}_value_cache.bin"))
+
+
+def maybe_dump_talker_kv_cache_debug_artifacts(
+    dump_dir: Optional[str],
+    generation_step: Optional[int],
+    dump_max_steps: Optional[int],
+    past_key_values: Optional[Cache],
+    valid_seq_len: Optional[int] = None,
+) -> None:
+    if dump_dir is None:
+        return
+
+    if generation_step is None or generation_step < 0:
+        prefix = "prefill"
+    else:
+        if dump_max_steps is not None and generation_step >= dump_max_steps:
+            return
+        prefix = f"step_{generation_step:04d}"
+
+    dump_talker_kv_cache_debug_artifacts(
+        dump_dir=dump_dir,
+        prefix=prefix,
+        past_key_values=past_key_values,
+        valid_seq_len=valid_seq_len,
+    )
+
+
+def dump_talker_decode_step_debug_artifacts(
+    step_index: int,
+    dump_dir: str,
+    inputs_embeds: torch.Tensor,
+    logits: torch.Tensor,
+    past_hidden: torch.Tensor,
+    codec_ids: Optional[torch.Tensor] = None,
+    input_ids: Optional[torch.Tensor] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.Tensor] = None,
+    cache_position: Optional[torch.Tensor] = None,
+) -> None:
+    os.makedirs(dump_dir, exist_ok=True)
+    step_prefix = os.path.join(dump_dir, f"step_{step_index:04d}")
+
+    dump_bf16_tensor3d(inputs_embeds, f"{step_prefix}_input_embed.bin")
+    dump_bf16_tensor3d(past_hidden, f"{step_prefix}_last_hidden.bin")
+    np.save(f"{step_prefix}_logits.npy", logits.detach().to(device="cpu", dtype=torch.float32).numpy())
+
+    if codec_ids is not None:
+        np.save(f"{step_prefix}_codec_ids.npy", codec_ids.detach().to(device="cpu", dtype=torch.int32).numpy())
+    if input_ids is not None:
+        np.save(f"{step_prefix}_input_ids.npy", input_ids.detach().to(device="cpu", dtype=torch.int32).numpy())
+    if attention_mask is not None:
+        np.save(
+            f"{step_prefix}_attention_mask.npy",
+            attention_mask.detach().to(device="cpu", dtype=torch.int32).numpy(),
+        )
+    if position_ids is not None:
+        np.save(
+            f"{step_prefix}_position_ids.npy",
+            position_ids.detach().to(device="cpu", dtype=torch.int32).numpy(),
+        )
+    if cache_position is not None:
+        np.save(
+            f"{step_prefix}_cache_position.npy",
+            cache_position.detach().to(device="cpu", dtype=torch.int32).numpy(),
+        )
+
+    torch.save(
+        {
+            "step_index": step_index,
+            "input_embed_shape": tuple(inputs_embeds.shape),
+            "logits_shape": tuple(logits.shape),
+            "last_hidden_shape": tuple(past_hidden.shape),
+            "codec_ids_shape": None if codec_ids is None else tuple(codec_ids.shape),
+            "input_ids_shape": None if input_ids is None else tuple(input_ids.shape),
+            "attention_mask_shape": None if attention_mask is None else tuple(attention_mask.shape),
+            "position_ids_shape": None if position_ids is None else tuple(position_ids.shape),
+            "cache_position_shape": None if cache_position is None else tuple(cache_position.shape),
+        },
+        f"{step_prefix}_meta.pt",
+    )
+
+
+def maybe_dump_talker_decode_step_debug_artifacts(
+    dump_dir: Optional[str],
+    generation_step: Optional[int],
+    dump_max_steps: Optional[int],
+    inputs_embeds: torch.Tensor,
+    logits: torch.Tensor,
+    past_hidden: torch.Tensor,
+    codec_ids: Optional[torch.Tensor] = None,
+    input_ids: Optional[torch.Tensor] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.Tensor] = None,
+    cache_position: Optional[torch.Tensor] = None,
+) -> None:
+    if dump_dir is None or generation_step is None or generation_step < 0:
+        return
+    if dump_max_steps is not None and generation_step >= dump_max_steps:
+        return
+
+    dump_talker_decode_step_debug_artifacts(
+        step_index=generation_step,
+        dump_dir=dump_dir,
+        inputs_embeds=inputs_embeds,
+        logits=logits,
+        past_hidden=past_hidden,
+        codec_ids=codec_ids,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        cache_position=cache_position,
+    )
 
 def mel_spectrogram(
     y: torch.Tensor,
@@ -1608,6 +1823,33 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
 
     def get_decoder(self):
         return self.model
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids=None,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        dump_talker_decode_dir=None,
+        dump_talker_decode_max_steps=None,
+        dump_talker_kv_cache_dir=None,
+        dump_talker_kv_cache_max_steps=None,
+        **kwargs,
+    ):
+        model_inputs = super().prepare_inputs_for_generation(
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        model_inputs["dump_talker_decode_dir"] = dump_talker_decode_dir
+        model_inputs["dump_talker_decode_max_steps"] = dump_talker_decode_max_steps
+        model_inputs["dump_talker_kv_cache_dir"] = dump_talker_kv_cache_dir
+        model_inputs["dump_talker_kv_cache_max_steps"] = dump_talker_kv_cache_max_steps
+        return model_inputs
     
     def forward_sub_talker_finetune(self, codec_ids, talker_hidden_states):
         assert len(codec_ids.shape) == 2
@@ -1661,6 +1903,11 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
             config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
             (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
         ```"""
+        dump_talker_decode_dir = kwargs.pop("dump_talker_decode_dir", None)
+        dump_talker_decode_max_steps = kwargs.pop("dump_talker_decode_max_steps", None)
+        dump_talker_kv_cache_dir = kwargs.pop("dump_talker_kv_cache_dir", None)
+        dump_talker_kv_cache_max_steps = kwargs.pop("dump_talker_kv_cache_max_steps", None)
+
         # Prefill
         if inputs_embeds is not None and inputs_embeds.shape[1] > 1:
             generation_step = -1
@@ -1729,6 +1976,28 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        maybe_dump_talker_decode_step_debug_artifacts(
+            dump_dir=dump_talker_decode_dir,
+            generation_step=generation_step,
+            dump_max_steps=dump_talker_decode_max_steps,
+            inputs_embeds=inputs_embeds,
+            logits=logits,
+            past_hidden=hidden_states[:, -1:, :],
+            codec_ids=codec_ids,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            cache_position=cache_position,
+        )
+        valid_seq_len = None if attention_mask is None else int(attention_mask.shape[-1])
+        maybe_dump_talker_kv_cache_debug_artifacts(
+            dump_dir=dump_talker_kv_cache_dir,
+            generation_step=generation_step,
+            dump_max_steps=dump_talker_kv_cache_max_steps,
+            past_key_values=outputs.past_key_values,
+            valid_seq_len=valid_seq_len,
+        )
 
 
         return Qwen3TTSTalkerOutputWithPast(
@@ -2041,6 +2310,14 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         repetition_penalty: float = 1.05,
         **kwargs,
     ):
+        dump_talker_prefill_path = kwargs.pop("dump_talker_prefill_path", None)
+        dump_talker_prefill_last_hidden_path = kwargs.pop("dump_talker_prefill_last_hidden_path", None)
+        dump_talker_step0_logits_path = kwargs.pop("dump_talker_step0_logits_path", None)
+        dump_talker_decode_dir = kwargs.pop("dump_talker_decode_dir", None)
+        dump_talker_decode_max_steps = kwargs.pop("dump_talker_decode_max_steps", None)
+        dump_talker_kv_cache_dir = kwargs.pop("dump_talker_kv_cache_dir", None)
+        dump_talker_kv_cache_max_steps = kwargs.pop("dump_talker_kv_cache_max_steps", None)
+
         talker_kwargs = {
             "max_new_tokens": max_new_tokens,
             "min_new_tokens": 2,
@@ -2062,7 +2339,11 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
                 if i not in (self.config.talker_config.codec_eos_token_id,)
             ],
             "output_hidden_states": getattr(kwargs, "output_hidden_states", True),
-            "return_dict_in_generate": getattr(kwargs, "return_dict_in_generate", True)
+            "return_dict_in_generate": getattr(kwargs, "return_dict_in_generate", True),
+            "dump_talker_decode_dir": dump_talker_decode_dir,
+            "dump_talker_decode_max_steps": dump_talker_decode_max_steps,
+            "dump_talker_kv_cache_dir": dump_talker_kv_cache_dir,
+            "dump_talker_kv_cache_max_steps": dump_talker_kv_cache_max_steps,
         }
         
         talker_input_embeds = [[] for _ in range(len(input_ids))]
@@ -2252,6 +2533,31 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         indices = torch.arange(max_len).expand(batch_size, -1)
         num_pads = max_len - original_lengths
         talker_attention_mask = (indices >= num_pads.unsqueeze(1)).long().to(talker_input_embeds.device)
+
+        if dump_talker_prefill_path is not None:
+            dump_talker_prefill_debug_artifacts(
+                talker_input_embeds=talker_input_embeds,
+                talker_attention_mask=talker_attention_mask,
+                dump_path=dump_talker_prefill_path,
+                original_lengths=original_lengths,
+            )
+
+        if dump_talker_prefill_last_hidden_path is not None or dump_talker_step0_logits_path is not None:
+            prefill_outputs = self.talker(
+                input_ids=None,
+                attention_mask=talker_attention_mask,
+                inputs_embeds=talker_input_embeds,
+                use_cache=True,
+                output_attentions=False,
+                output_hidden_states=False,
+            )
+            dump_talker_step0_debug_artifacts(
+                past_hidden=prefill_outputs.past_hidden,
+                logits=prefill_outputs.logits[:, -1, :],
+                hidden_dump_path=dump_talker_prefill_last_hidden_path,
+                logits_dump_path=dump_talker_step0_logits_path,
+            )
+
         # padding trailing text hiddens
         pad_embedding_vector = tts_pad_embed.squeeze()
         sequences_to_pad = [t.squeeze(0) for t in trailing_text_hiddens]
