@@ -16,6 +16,7 @@
 
 import json
 import os
+import struct
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -50,6 +51,20 @@ from .configuration_qwen3_tts import (Qwen3TTSConfig,
                                       Qwen3TTSTalkerConfig)
 
 logger = logging.get_logger(__name__)
+
+
+def save_bf16_tensor3d(path: str, tensor: torch.Tensor) -> None:
+    if tensor.dim() != 3:
+        raise ValueError(f"Expected a 3D tensor to dump, got shape {tuple(tensor.shape)}")
+
+    tensor_bf16 = tensor.detach().to(dtype=torch.bfloat16).contiguous().cpu()
+    batch, seq, hidden = tensor_bf16.shape
+    payload = tensor_bf16.view(torch.uint16).numpy().tobytes()
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as file_obj:
+        file_obj.write(struct.pack("III", batch, seq, hidden))
+        file_obj.write(payload)
 
 
 def download_weights_from_hf_specific(
@@ -2037,8 +2052,10 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         subtalker_top_k: int = 50,
         subtalker_top_p: float = 1.0,
         subtalker_temperature: float = 0.9,
+        print_output_tokens: bool = False,
         eos_token_id: Optional[int] = None,
         repetition_penalty: float = 1.05,
+        dump_talker_prefill_path: Optional[str] = None,
         **kwargs,
     ):
         talker_kwargs = {
@@ -2268,107 +2285,8 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         padded_hiddens[padding_mask] = pad_embedding_vector
         trailing_text_hiddens = padded_hiddens
 
-        # Debug: Save talker input and output to file
-        import os
-        debug_dir = "debug_output"
-        os.makedirs(debug_dir, exist_ok=True)
-
-        # Save talker input info
-        debug_talker_input_file = os.path.join(debug_dir, "talker_input.txt")
-        with open(debug_talker_input_file, "w", encoding="utf-8") as f:
-            f.write("=" * 70 + "\n")
-            f.write("Talker (LLM) Input Parameters\n")
-            f.write("=" * 70 + "\n\n")
-
-            # Generation kwargs
-            f.write("--- Generation Parameters ---\n")
-            for key, val in talker_kwargs.items():
-                if isinstance(val, torch.Tensor):
-                    f.write(f"  {key}: Tensor shape={val.shape}, dtype={val.dtype}\n")
-                elif isinstance(val, list):
-                    f.write(f"  {key}: list len={len(val)}\n")
-                else:
-                    f.write(f"  {key}: {val}\n")
-            f.write("\n")
-
-            # Input embeddings info
-            f.write("--- Input Embeddings ---\n")
-            f.write(f"talker_input_embeds shape: {talker_input_embeds.shape}\n")
-            f.write(f"talker_attention_mask shape: {talker_attention_mask.shape}\n")
-            f.write(f"trailing_text_hiddens shape: {trailing_text_hiddens.shape}\n\n")
-
-            # Special token ID mapping
-            special_tokens = {
-                "codec_bos_id": self.config.talker_config.codec_bos_id,
-                "codec_eos_token_id": self.config.talker_config.codec_eos_token_id,
-                "codec_pad_id": self.config.talker_config.codec_pad_id,
-                "codec_think_id": self.config.talker_config.codec_think_id,
-                "codec_think_bos_id": self.config.talker_config.codec_think_bos_id,
-                "codec_think_eos_id": self.config.talker_config.codec_think_eos_id,
-                "codec_nothink_id": self.config.talker_config.codec_nothink_id,
-            }
-            # Add language IDs
-            if self.config.talker_config.codec_language_id:
-                for lang, lang_id in self.config.talker_config.codec_language_id.items():
-                    special_tokens[f"language_{lang}"] = lang_id
-
-            f.write("--- Special Token IDs ---\n")
-            for name, tid in special_tokens.items():
-                f.write(f"  {name}: {tid}\n")
-            f.write("\n")
-
-            # Get input token IDs by decoding embeddings
-            # The input embeddings are already in the model, we need to find the closest token IDs
-            # We'll use the model's embedding layer to find the nearest tokens
-            f.write("--- Input Token IDs (approximate from embeddings) ---\n")
-
-            # Get the input embeddings as tokens
-            # Since we don't have direct access to input_ids, we'll save the embedding indices
-            # by looking at the input_embeddin's layer
-            input_embeds_np = talker_input_embeds.float().cpu().numpy()
-            for batch_idx in range(input_embeds_np.shape[0]):
-                f.write(f"\n=== Batch {batch_idx} ===\n")
-                f.write(f"Sequence length: {input_embeds_np.shape[1]}\n")
-                f.write(f"Embedding dim: {input_embeds_np.shape[2]}\n")
-
-                # Try to decode using the embedding layer
-                try:
-                    # Get embedding weights
-                    emb_weights = self.talker.get_input_embeddings().weight.detach().cpu()
-
-                    # For each position, find the closest embedding
-                    input_seq = input_embeds_np[batch_idx]  # (seq_len, hidden_dim)
-
-                    # Compute cosine similarity to find nearest tokens
-                    from torch.nn.functional import cosine_similarity
-                    input_tensor = torch.tensor(input_seq)
-                    token_ids = []
-                    for pos in range(input_seq.shape[0]):
-                        pos_embed = input_tensor[pos:pos+1]  # (1, hidden_dim)
-                        similarities = cosine_similarity(pos_embed, emb_weights, dim=1)
-                        nearest_token = similarities.argmax().item()
-                        token_ids.append(nearest_token)
-
-                    f.write(f"Decoded token IDs (nearest): {token_ids}\n")
-
-                    # Group tokens by type for readability
-                    readable_tokens = []
-                    for tid in token_ids:
-                        token_name = ""
-                        for name, tid_ref in special_tokens.items():
-                            if tid == tid_ref:
-                                token_name = f"<{name}>"
-                                break
-                        if token_name:
-                            readable_tokens.append(token_name)
-                        else:
-                            readable_tokens.append(str(tid))
-
-                    f.write(f"Readable tokens: {readable_tokens}\n")
-                except Exception as e:
-                    f.write(f"Could not decode tokens: {e}\n")
-
-        print(f"[DEBUG] Talker input saved to {debug_talker_input_file}")
+        if dump_talker_prefill_path:
+            save_bf16_tensor3d(dump_talker_prefill_path, talker_input_embeds)
 
         # forward
         talker_result = self.talker.generate(
@@ -2390,39 +2308,13 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         
         talker_codes_list = [talker_codes[i, :length, ] for i, length in enumerate(effective_lengths)]
         talker_hidden_states_list = [talker_hidden_states[i, :length, :] for i, length in enumerate(effective_lengths)]
-        
-        # Debug: Save talker output
-        debug_talker_output_file = os.path.join(debug_dir, "talker_output.txt")
-        with open(debug_talker_output_file, "w", encoding="utf-8") as f:
-            f.write("=" * 70 + "\n")
-            f.write("Talker (LLM) Output\n")
-            f.write("=" * 70 + "\n\n")
 
-            # talker_codes info
-            f.write("--- Generated Codec Codes ---\n")
-            f.write(f"talker_codes shape: {talker_codes.shape}\n")
-            f.write(f"Number of codebooks: {talker_codes.shape[2]}\n")
-            f.write(f"Effective lengths: {effective_lengths.tolist()}\n\n")
-
-            # Special token info
-            f.write("--- Special Token IDs ---\n")
-            f.write(f"codec_eos_token_id: {self.config.talker_config.codec_eos_token_id}\n")
-            f.write(f"codec_bos_id: {self.config.talker_config.codec_bos_id}\n\n")
-
-            # Output token details
-            for batch_idx in range(len(talker_codes_list)):
-                codes = talker_codes_list[batch_idx]
-                f.write(f"=== Batch {batch_idx} ===\n")
-                f.write(f"Shape: {codes.shape}\n")
-                f.write(f"Dtype: {codes.dtype}\n")
-
-                # Flatten: [t0_c0, t0_c1, ..., t0_c15, t1_c0, ...] - same as voice_design_output
-                codes_np = codes.cpu().numpy()
-                flat = codes_np.flatten()
-                f.write(f"Values: {flat.tolist()}\n")
-                f.write(f"Min: {flat.min()}, Max: {flat.max()}, Mean: {flat.mean():.4f}\n\n")
-
-        print(f"[DEBUG] Talker output saved to {debug_talker_output_file}")
+        if print_output_tokens:
+            for index, codes in enumerate(talker_codes_list):
+                talker_tokens = codes[:, 0].detach().cpu().tolist()
+                code_tokens = codes.detach().cpu().tolist()
+                print(f"[sample {index}] talker tokens: {talker_tokens}")
+                print(f"[sample {index}] code tokens: {code_tokens}")
 
         return talker_codes_list, talker_hidden_states_list
 

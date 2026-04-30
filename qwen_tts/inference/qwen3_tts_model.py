@@ -17,6 +17,7 @@ import base64
 import io
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
@@ -351,6 +352,12 @@ class Qwen3TTSModel:
         )
         return merged
 
+    @staticmethod
+    def _save_talker_codes_npy(path: str, talker_codes: torch.Tensor) -> None:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(output_path, talker_codes.detach().cpu().numpy())
+
     # voice clone model
     @torch.inference_mode()
     def create_voice_clone_prompt(
@@ -533,6 +540,9 @@ class Qwen3TTSModel:
                 Temperature for sub-talker sampling (only valid for qwen3-tts-tokenizer-v2).
             max_new_tokens:
                 Maximum number of new codec tokens to generate.
+            dump_talker_prefill_path:
+                Optional output path for the talker prefill embedding dump used by the C++ runtime.
+                The file format is little-endian `uint32 batch, uint32 seq, uint32 hidden` followed by bf16 payload.
             **kwargs:
                 Any other keyword arguments supported by HuggingFace Transformers `generate()` can be passed.
                 They will be forwarded to the underlying `Qwen3TTSForConditionalGeneration.generate(...)`.
@@ -640,6 +650,8 @@ class Qwen3TTSModel:
         instruct: Union[str, List[str]],
         language: Union[str, List[str]] = None,
         non_streaming_mode: bool = True,
+        dump_talker_prefill_path: Optional[str] = None,
+        dump_talker_codes_npy_path: Optional[str] = None,
         **kwargs,
     ) -> Tuple[List[np.ndarray], int]:
         """
@@ -655,6 +667,11 @@ class Qwen3TTSModel:
             non_streaming_mode:
                 Using non-streaming text input, this option currently only simulates streaming text input when set to `false`, 
                 rather than enabling true streaming input or streaming generation.
+            dump_talker_prefill_path:
+                Optional output path for the talker prefill embedding dump consumed by the AXERA C++ runtime.
+            dump_talker_codes_npy_path:
+                Optional output path for the generated talker codec codes of the first sample, saved as a `.npy` file
+                with shape `[frames, codebooks]`.
             do_sample:
                 Whether to use sampling, recommended to be set to `true` for most use cases.
             top_k:
@@ -714,64 +731,10 @@ class Qwen3TTSModel:
             else:
                 instruct_ids.append(self._tokenize_texts([self._build_instruct_text(ins)])[0])
 
-        gen_kwargs = self._merge_generate_kwargs(**kwargs)
-
-        # Debug: save input parameters to text file
-        import os
-        debug_dir = "debug_output"
-        os.makedirs(debug_dir, exist_ok=True)
-        debug_input_file = os.path.join(debug_dir, "voice_design_input.txt")
-        with open(debug_input_file, "w", encoding="utf-8") as f:
-            f.write("=" * 60 + "\n")
-            f.write("VoiceDesign Input Parameters\n")
-            f.write("=" * 60 + "\n\n")
-
-            # texts
-            f.write(f"texts (original input): {texts}\n")
-            f.write(f"texts count: {len(texts)}\n\n")
-
-            # languages
-            f.write(f"languages: {languages}\n")
-            f.write(f"languages count: {len(languages)}\n\n")
-
-            # instructs
-            f.write(f"instructs (original input): {instructs}\n")
-            f.write(f"instructs count: {len(instructs)}\n\n")
-
-            # non_streaming_mode
-            f.write(f"non_streaming_mode: {non_streaming_mode}\n\n")
-
-            # input_ids (tokenized text)
-            f.write("input_ids (tokenized text):\n")
-            for i, ids in enumerate(input_ids):
-                f.write(f"  Sample {i}: shape={ids.shape}, dtype={ids.dtype}\n")
-                ids_np = ids.cpu().numpy().flatten()
-                f.write(f"    Values: {ids_np.tolist()}\n")
-                f.write(f"    Min: {ids_np.min()}, Max: {ids_np.max()}, Mean: {ids_np.mean():.4f}\n")
-            f.write("\n")
-
-            # instruct_ids (tokenized instruct)
-            f.write("instruct_ids (tokenized instruct):\n")
-            for i, ids in enumerate(instruct_ids):
-                if ids is None:
-                    f.write(f"  Sample {i}: None\n")
-                else:
-                    f.write(f"  Sample {i}: shape={ids.shape}, dtype={ids.dtype}\n")
-                    ids_np = ids.cpu().numpy().flatten()
-                    f.write(f"    Values: {ids_np.tolist()}\n")
-                    f.write(f"    Min: {ids_np.min()}, Max: {ids_np.max()}, Mean: {ids_np.mean():.4f}\n")
-            f.write("\n")
-
-            # gen_kwargs (generation parameters)
-            f.write("gen_kwargs (generation parameters):\n")
-            for key, val in gen_kwargs.items():
-                if isinstance(val, torch.Tensor):
-                    f.write(f"  {key}: Tensor shape={val.shape}, dtype={val.dtype}\n")
-                elif isinstance(val, list):
-                    f.write(f"  {key}: list len={len(val)}\n")
-                else:
-                    f.write(f"  {key}: {val}\n")
-        print(f"[DEBUG] Input parameters saved to {debug_input_file}")
+        gen_kwargs = self._merge_generate_kwargs(
+            dump_talker_prefill_path=dump_talker_prefill_path,
+            **kwargs,
+        )
 
         talker_codes_list, _ = self.model.generate(
             input_ids=input_ids,
@@ -781,25 +744,8 @@ class Qwen3TTSModel:
             **gen_kwargs,
         )
 
-        # Debug: save output codes to text file
-        debug_output_file = os.path.join(debug_dir, "voice_design_output.txt")
-        with open(debug_output_file, "w", encoding="utf-8") as f:
-            f.write(f"Number of samples: {len(talker_codes_list)}\n\n")
-            for i, codes in enumerate(talker_codes_list):
-                f.write(f"=== Sample {i} ===\n")
-                f.write(f"Shape: {codes.shape}\n")
-                f.write(f"Dtype: {codes.dtype}\n")
-                codes_np = codes.cpu().numpy()
-                flat = codes_np.flatten()
-                f.write(f"Values: {flat.tolist()}\n")
-                f.write(f"Min: {flat.min()}, Max: {flat.max()}, Mean: {flat.mean():.4f}\n\n")
-
-                # ==== 新增代码：将张量保存为 npy 文件 ====
-                npy_filename = os.path.join(debug_dir, f"sample_{i}_codes.npy")
-                np.save(npy_filename, codes_np)
-                print(f"[DEBUG] Saved codes tensor for sample {i} to {npy_filename}")
-                # ==========================================
-        print(f"[DEBUG] Output codes saved to {debug_output_file}")
+        if dump_talker_codes_npy_path and talker_codes_list:
+            self._save_talker_codes_npy(dump_talker_codes_npy_path, talker_codes_list[0])
 
         wavs, fs = self.model.speech_tokenizer.decode([{"audio_codes": c} for c in talker_codes_list])
         return wavs, fs

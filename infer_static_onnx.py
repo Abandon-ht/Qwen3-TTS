@@ -57,8 +57,9 @@ def infer_onnx(onnx_path: str, input_npy_path: str, output_wav_path: str, proces
 if __name__ == "__main__":
 
     ONNX_MODEL_PATH = "qwen3_tts_12hz_decoder_clean.onnx"
-    # ONNX_MODEL_PATH = "decoder/frontend/optimized.onnx"
-    NPY_FILE_PATH = "debug_output/sample_0_codes.npy" 
+    ONNX_MODEL_PATH = "qwen3_tts_12hz_0,6B-Base-decoder_static.onnx"
+    ONNX_MODEL_PATH = "qwen3_tts_12hz_1.7B-VoiceDesign-decoder_static.onnx"
+    NPY_FILE_PATH = "debug_output/python_sample_0_codes.npy" 
     OUTPUT_WAV_FILE = "debug_output/onnx_output.wav"
     OUTPUT_NPY_FILE = "debug_output/onnx_output.npy"
     

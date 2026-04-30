@@ -50,7 +50,9 @@ def export_static_12hz_decoder_to_onnx(
 
 if __name__ == "__main__":
 
-    MODEL_PATH = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/speech_tokenizer"  
-    OUTPUT_ONNX = "qwen3_tts_12hz_decoder_static.onnx"
+    MODEL_PATH = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/speech_tokenizer"
+    # MODEL_PATH = "Qwen/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer"
+    OUTPUT_ONNX = "qwen3_tts_12hz_1.7B-VoiceDesign-decoder_static.onnx"
+    # OUTPUT_ONNX = "qwen3_tts_12hz_0,6B-Base-decoder_static.onnx"
     
     export_static_12hz_decoder_to_onnx(MODEL_PATH, OUTPUT_ONNX, batch_size=1, codes_length=300)

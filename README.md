@@ -145,6 +145,16 @@ Also, you should have hardware that is compatible with FlashAttention 2. Read mo
 
 After installation, you can import `Qwen3TTSModel` to run custom voice TTS, voice design, and voice clone. The model weights can be specified either as a Hugging Face model id (recommended) or as a local directory path you downloaded. For all the `generate_*` functions below, besides the parameters shown and explicitly documented, you can also pass generation kwargs supported by Hugging Face Transformers `model.generate`, e.g., `max_new_tokens`, `top_p`, etc.
 
+### Tokenizer Web Tool
+
+This repository also includes a small local web tool for text tokenizer inspection. It can load a tokenizer directory or a `tokenizer_config.json` file, encode text into token ids, decode token ids back into text, and show the tokenizer vocabulary size.
+
+```bash
+python tokenizer_web.py --tokenizer-path Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign --host 0.0.0.0 --port 7860
+```
+
+If you omit `--tokenizer-path`, it defaults to `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`.
+
 #### Custom Voice Generate
 
 For custom voice models (`Qwen3-TTS-12Hz-1.7B/0.6B-CustomVoice`), you just need to call `generate_custom_voice`, passing a single string or a batch list, along with `language`, `speaker`, and optional `instruct`. You can also call `model.get_supported_speakers()` and `model.get_supported_languages()` to see which speakers and languages the current model supports.

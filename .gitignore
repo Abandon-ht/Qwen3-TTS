@@ -22,3 +22,9 @@ wheels/
 .vscode/
 venv/
 env/
+codes/
+debug_output/
+decoder/
+*.onnx
+*.axmodel
+*.wav
