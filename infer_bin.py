@@ -98,19 +98,29 @@ def main():
     work_dir = os.path.dirname(os.path.abspath(__file__))
     bin_path = os.path.join(work_dir, "output_codes.bin")
     meta_path = os.path.join(work_dir, "output_meta.json")
-    onnx_path = os.path.join(os.path.dirname(work_dir), "qwen3_tts_12hz_0,6B-Base-decoder_static.onnx")
-
-    output_wav = os.path.join(work_dir, "output_ax650.wav")
-    output_npy = os.path.join(work_dir, "output_ax650.npy")
+    onnx_path = os.path.join(work_dir, "qwen3_tts_12hz_0.6B-Base-decoder_static.onnx")
 
     # 1. Read bin
     codes = read_codes_bin(bin_path, meta_path)
 
-    # 2. Prepare ONNX input (pad/crop to 300 frames)
-    onnx_input = prepare_onnx_input(codes, target_len=300)
+    # 2. Split into batches of max 300 frames
+    total_frames = codes.shape[0]
+    target_len = 300
+    num_batches = (total_frames + target_len - 1) // target_len
 
-    # 3. Run ONNX decoder
-    run_onnx(onnx_path, onnx_input, output_wav, output_npy)
+    for i in range(num_batches):
+        start = i * target_len
+        end = min(start + target_len, total_frames)
+        chunk = codes[start:end]
+        print(f"[BATCH {i:02d}] frames [{start}:{end}] / {total_frames}")
+
+        onnx_input = prepare_onnx_input(chunk, target_len=target_len)
+
+        output_wav = os.path.join(work_dir, f"output_ax650_{i:02d}.wav")
+        output_npy = os.path.join(work_dir, f"output_ax650_{i:02d}.npy")
+
+        # 3. Run ONNX decoder
+        run_onnx(onnx_path, onnx_input, output_wav, output_npy)
 
 
 if __name__ == "__main__":
